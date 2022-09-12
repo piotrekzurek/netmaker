@@ -12,6 +12,7 @@ import (
 
 	"github.com/gravitl/netmaker/logger"
 	"github.com/gravitl/netmaker/models"
+	"github.com/gravitl/netmaker/netclient/global_settings"
 	"github.com/gravitl/netmaker/netclient/ncutils"
 	"github.com/urfave/cli/v2"
 	"gopkg.in/yaml.v3"
@@ -30,6 +31,7 @@ type ClientConfig struct {
 	Daemon          string              `yaml:"daemon"`
 	OperatingSystem string              `yaml:"operatingsystem"`
 	AccessKey       string              `yaml:"accesskey"`
+	PublicIPService string              `yaml:"publicipservice"`
 }
 
 // RegisterRequest - struct for registation with netmaker server
@@ -93,28 +95,42 @@ func (config *ClientConfig) ConfigFileExists() bool {
 // ClientConfig.ReadConfig - used to read config from client disk into memory
 func (config *ClientConfig) ReadConfig() {
 
-	nofile := false
+	network := config.Network
+	if network == "" {
+		return
+	}
+
 	//home, err := homedir.Dir()
 	home := ncutils.GetNetclientPathSpecific()
 
-	file := fmt.Sprintf(home + "netconfig-" + config.Network)
+	file := fmt.Sprintf(home + "netconfig-" + network)
 	//f, err := os.Open(file)
 	f, err := os.OpenFile(file, os.O_RDONLY, 0600)
 	if err != nil {
 		logger.Log(1, "trouble opening file: ", err.Error())
-		nofile = true
-		//fmt.Println("Could not access " + home + "/.netconfig,  proceeding...")
+		if err = ReplaceWithBackup(network); err != nil {
+			log.Fatal(err)
+		}
+		f.Close()
+		f, err = os.Open(file)
+		if err != nil {
+			log.Fatal(err)
+		}
+
 	}
 	defer f.Close()
-
-	//var cfg ClientConfig
-
-	if !nofile {
-		decoder := yaml.NewDecoder(f)
-		err = decoder.Decode(&config)
+	if err := yaml.NewDecoder(f).Decode(&config); err != nil {
+		logger.Log(0, "no config or invalid, replacing with backup")
+		if err = ReplaceWithBackup(network); err != nil {
+			log.Fatal(err)
+		}
+		f.Close()
+		f, err = os.Open(file)
 		if err != nil {
-			fmt.Println("no config or invalid")
-			fmt.Println(err)
+			log.Fatal(err)
+		}
+		defer f.Close()
+		if err := yaml.NewDecoder(f).Decode(&config); err != nil {
 			log.Fatal(err)
 		}
 	}
@@ -231,6 +247,10 @@ func GetCLIConfig(c *cli.Context) (ClientConfig, string, error) {
 		cfg.Server.CoreDNSAddr = c.String("corednsaddr")
 		cfg.Server.API = c.String("apiserver")
 	}
+	cfg.PublicIPService = c.String("publicipservice")
+	// populate the map as we're not running as a daemon so won't be building the map otherwise
+	// (and the map will be used by GetPublicIP()).
+	global_settings.PublicIPServices[cfg.Network] = cfg.PublicIPService
 	cfg.Node.Name = c.String("name")
 	cfg.Node.Interface = c.String("interface")
 	cfg.Node.Password = c.String("password")
@@ -264,32 +284,38 @@ func ReadConfig(network string) (*ClientConfig, error) {
 		err := errors.New("no network provided - exiting")
 		return nil, err
 	}
-	nofile := false
 	home := ncutils.GetNetclientPathSpecific()
 	file := fmt.Sprintf(home + "netconfig-" + network)
 	f, err := os.Open(file)
-
 	if err != nil {
 		if err = ReplaceWithBackup(network); err != nil {
-			nofile = true
+			return nil, err
 		}
 		f, err = os.Open(file)
 		if err != nil {
-			nofile = true
+			return nil, err
 		}
 	}
 	defer f.Close()
 
 	var cfg ClientConfig
-
-	if !nofile {
-		decoder := yaml.NewDecoder(f)
-		err = decoder.Decode(&cfg)
+	decoder := yaml.NewDecoder(f)
+	err = decoder.Decode(&cfg)
+	if err != nil {
+		if err = ReplaceWithBackup(network); err != nil {
+			return nil, err
+		}
+		f.Close()
+		f, err = os.Open(file)
 		if err != nil {
-			fmt.Println("trouble decoding file")
+			return nil, err
+		}
+		defer f.Close()
+		if err := yaml.NewDecoder(f).Decode(&cfg); err != nil {
 			return nil, err
 		}
 	}
+
 	return &cfg, err
 }
 

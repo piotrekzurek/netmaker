@@ -22,6 +22,9 @@ func IfaceDelta(currentNode *models.Node, newNode *models.Node) bool {
 		newNode.IsPending != currentNode.IsPending ||
 		newNode.PersistentKeepalive != currentNode.PersistentKeepalive ||
 		newNode.DNSOn != currentNode.DNSOn ||
+		newNode.Connected != currentNode.Connected ||
+		newNode.PostUp != currentNode.PostUp ||
+		newNode.PostDown != currentNode.PostDown ||
 		len(newNode.AllowedIPs) != len(currentNode.AllowedIPs) {
 		return true
 	}
@@ -89,4 +92,8 @@ func IfaceExists(ifacename string) bool {
 		}
 	}
 	return false
+}
+
+func IpIsPrivate(ipnet net.IP) bool {
+	return ipnet.IsPrivate() || ipnet.IsLoopback()
 }

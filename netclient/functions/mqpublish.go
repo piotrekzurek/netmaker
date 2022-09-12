@@ -13,6 +13,7 @@ import (
 
 	"github.com/cloverstd/tcping/ping"
 	"github.com/gravitl/netmaker/logger"
+	"github.com/gravitl/netmaker/models"
 	"github.com/gravitl/netmaker/netclient/auth"
 	"github.com/gravitl/netmaker/netclient/config"
 	"github.com/gravitl/netmaker/netclient/ncutils"
@@ -20,7 +21,8 @@ import (
 )
 
 // Checkin  -- go routine that checks for public or local ip changes, publishes changes
-//   if there are no updates, simply "pings" the server as a checkin
+//
+//	if there are no updates, simply "pings" the server as a checkin
 func Checkin(ctx context.Context, wg *sync.WaitGroup) {
 	logger.Log(2, "starting checkin goroutine")
 	defer wg.Done()
@@ -43,8 +45,19 @@ func checkin() {
 		var nodeCfg config.ClientConfig
 		nodeCfg.Network = network
 		nodeCfg.ReadConfig()
+		// check for nftables present if on Linux
+		if ncutils.IsLinux() {
+			if ncutils.IsNFTablesPresent() {
+				nodeCfg.Node.FirewallInUse = models.FIREWALL_NFTABLES
+			} else {
+				nodeCfg.Node.FirewallInUse = models.FIREWALL_IPTABLES
+			}
+		} else {
+			// defaults to iptables for now, may need another default for non-Linux OSes
+			nodeCfg.Node.FirewallInUse = models.FIREWALL_IPTABLES
+		}
 		if nodeCfg.Node.IsStatic != "yes" {
-			extIP, err := ncutils.GetPublicIP()
+			extIP, err := ncutils.GetPublicIP(nodeCfg.Server.API)
 			if err != nil {
 				logger.Log(1, "error encountered checking public ip addresses: ", err.Error())
 			}
@@ -80,6 +93,11 @@ func checkin() {
 					logger.Log(0, "network:", nodeCfg.Node.Network, "could not publish localip change")
 				}
 			}
+		}
+		//check version
+		if nodeCfg.Node.Version != ncutils.Version {
+			nodeCfg.Node.Version = ncutils.Version
+			config.Write(&nodeCfg, nodeCfg.Network)
 		}
 		Hello(&nodeCfg)
 		checkCertExpiry(&nodeCfg)
@@ -129,17 +147,14 @@ func publish(nodeCfg *config.ClientConfig, dest string, msg []byte, qos byte) er
 		return err
 	}
 
-	client, err := setupMQTT(nodeCfg, true)
-	if err != nil {
-		return fmt.Errorf("mq setup error %w", err)
-	}
-	defer client.Disconnect(250)
 	encrypted, err := ncutils.Chunk(msg, serverPubKey, trafficPrivKey)
 	if err != nil {
 		return err
 	}
-
-	if token := client.Publish(dest, qos, false, encrypted); !token.WaitTimeout(30*time.Second) || token.Error() != nil {
+	if mqclient == nil {
+		return errors.New("unable to publish ... no mqclient")
+	}
+	if token := mqclient.Publish(dest, qos, false, encrypted); !token.WaitTimeout(30*time.Second) || token.Error() != nil {
 		logger.Log(0, "could not connect to broker at "+nodeCfg.Server.Server+":"+nodeCfg.Server.MQPort)
 		var err error
 		if token.Error() == nil {
